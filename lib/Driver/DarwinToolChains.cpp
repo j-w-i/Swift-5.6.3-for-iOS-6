@@ -893,7 +893,10 @@ static void validateDeploymentTarget(const toolchains::Darwin &TC,
         return;
       }
     }
-    if (triple.isOSVersionLT(7))
+    // Legacy backport builds legitimately target iOS 5/6; the compiler and runtime are patched to
+    // support those floors, so the stock iOS 7 minimum only applies without the opt-in.
+    if (triple.isOSVersionLT(7) &&
+        !args.hasArg(options::OPT_enable_legacy_ios5_runtime))
       diags.diagnose(SourceLoc(), diag::error_os_minimum_deployment,
                      "iOS 7");
     if (triple.isArch32Bit() && !triple.isOSVersionLT(11)) {

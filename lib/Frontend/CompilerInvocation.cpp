@@ -481,6 +481,7 @@ static bool ParseLangArgs(LangOptions &Opts, ArgList &Args,
 
   Opts.DisableAvailabilityChecking |=
       Args.hasArg(OPT_disable_availability_checking);
+  Opts.EnableLegacyIOS5Runtime |= Args.hasArg(OPT_enable_legacy_ios5_runtime);
   Opts.CheckAPIAvailabilityOnly |=
       Args.hasArg(OPT_check_api_availability_only);
 

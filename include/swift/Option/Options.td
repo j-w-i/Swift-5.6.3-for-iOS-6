@@ -413,6 +413,12 @@ def require_explicit_availability_target : Separate<["-"], "require-explicit-ava
   HelpText<"Suggest fix-its adding @available(<target>, *) to public declarations without availability">,
   MetaVarName<"<target>">;
 
+// Legacy iOS backport support: lowers SDK availability to the deployment target so that APIs the
+// backports provide compile at that target, and lets the importer see the backport facades.
+def enable_legacy_ios5_runtime : Flag<["-"], "enable-legacy-ios5-runtime">,
+  Flags<[FrontendOption]>,
+  HelpText<"Use the legacy iOS 5/6 availability model for the backported SDK APIs">;
+
 def require_explicit_sendable : Flag<["-"], "require-explicit-sendable">,
   Flags<[FrontendOption, NoInteractiveOption]>,
   HelpText<"Require explicit Sendable annotations on public declarations">;

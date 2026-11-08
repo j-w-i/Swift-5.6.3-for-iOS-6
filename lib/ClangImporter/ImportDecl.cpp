@@ -73,6 +73,200 @@ STATISTIC(NumTotalImportedEntities, "# of imported clang entities");
 STATISTIC(NumFactoryMethodsAsInitializers,
           "# of factory methods mapped to initializers");
 
+
+/// Deployment major of the translation target (iOS only; 0 elsewhere).
+static unsigned legacyDeploymentMajor(const swift::ASTContext &ctx) {
+  auto triple = ctx.LangOpts.Target;
+  if (!triple.isiOS() || triple.isTvOS())
+    return 0;
+  // This LLVM's Triple reports the iOS version through out-parameters.
+  unsigned major = 0, minor = 0, micro = 0;
+  triple.getiOSVersion(major, minor, micro);
+  return major;
+}
+
+/// Highest iOS version at which the backport supplies an implementation for this declaration.
+/// Zero means "not part of the backport set", so the SDK's own availability applies unchanged.
+/// This is the 5.10 fork's table, kept identical so the two compilers agree on every tier.
+/// Highest iOS version the backport covers for a whole type/family, by name. Zero means the family
+/// is not backported, so its own availability applies.
+static unsigned legacyUIKitFamilyCeiling(StringRef name) {
+  return llvm::StringSwitch<unsigned>(name)
+      // Original collection and Auto Layout surfaces (iOS 6). Constraint
+      // activate/deactivate/isActive (iOS 8) remain owned by the Swift overlay.
+      .Cases("UICollectionView", "UICollectionViewCell", "UICollectionReusableView", 6)
+      .Cases("UICollectionViewLayout", "UICollectionViewFlowLayout", 6)
+      .Cases("UICollectionViewLayoutAttributes", "UICollectionViewController", 6)
+      .Cases("UICollectionViewUpdateItem", "UICollectionViewDataSource", 6)
+      .Cases("UICollectionViewDelegate", "UICollectionViewDelegateFlowLayout", 6)
+      .Cases("UICollectionViewScrollPosition", "UICollectionViewScrollDirection", 6)
+      .Cases("UICollectionUpdateAction", "UICollectionElementCategory", 6)
+      .Cases("UICollectionElementKindSectionHeader", "UICollectionElementKindSectionFooter", 6)
+      .Cases("NSLayoutConstraint", "NSLayoutRelation", "NSLayoutAttribute", 6)
+      .Cases("NSLayoutFormatOptions", "UILayoutConstraintAxis", "UILayoutPriority", 6)
+      .Case("UIRefreshControl", 6)
+      // Model objects registered by the backports runtime; their inline text
+      // layout needs the iOS 7 text system, which iOS 5 does not have.
+      .Cases("NSTextAttachment", "NSTextContainer", 7)
+      // Implemented by the backports runtime with the sharing services iOS 5
+      // itself provides (photo library, pasteboard, Safari).
+      .Case("UIActivityViewController", 6)
+      // UILayoutGuide and the NSLayoutAnchor class family are NOT lowered: the
+      // runtime has no UILayoutGuide class, and the anchor surface is provided by
+      // the Swift shim as `Anchor`, so exposing the native classes would let a
+      // program compile against types with no implementation.
+      .Cases("UIStackView", "UIStackViewDistribution", "UIStackViewAlignment", 9)
+      // Compositional layout implements the iOS 13 contract, not later list,
+      // content-insets-reference, uniform-dimension or repeated-subitem APIs.
+      .Cases("UICollectionViewCompositionalLayout", "UICollectionViewCompositionalLayoutConfiguration", 13)
+      .Cases("NSCollectionLayoutSection", "NSCollectionLayoutItem", "NSCollectionLayoutGroup", 13)
+      .Cases("NSCollectionLayoutSize", "NSCollectionLayoutDimension", "NSCollectionLayoutSpacing", 13)
+      .Cases("NSCollectionLayoutEdgeSpacing", "NSCollectionLayoutAnchor", 13)
+      .Cases("NSCollectionLayoutBoundarySupplementaryItem", "NSCollectionLayoutDecorationItem", 13)
+      .Cases("NSCollectionLayoutSupplementaryItem", "NSCollectionLayoutGroupCustomItem", 13)
+      .Cases("NSCollectionLayoutContainer", "NSCollectionLayoutEnvironment", "NSCollectionLayoutVisibleItem", 13)
+      .Cases("UICollectionLayoutSectionOrthogonalScrollingBehavior", "NSDirectionalEdgeInsets", 13)
+      .Cases("NSDirectionalRectEdge", "NSRectAlignment", 13)
+      .Case("NSDirectionalEdgeInsetsZero", 13)
+      .Cases("NSDirectionalEdgeInsetsMake", "NSDirectionalEdgeInsetsEqualToDirectionalEdgeInsets", 13)
+      .Default(0);
+}
+
+static unsigned legacyUIKitDeclarationCeiling(const clang::Decl *decl) {
+  // Modern SDKs define these genuine UIKit priorities as initialized static
+  // constants. They are emitted as literals, not imports from absent iOS 6
+  // globals. Do not relax older SDKs' extern declarations on this basis.
+  if (auto variable = dyn_cast<clang::VarDecl>(decl)) {
+    // The VFS binds this real UIKit global to the SDK-owned private definition.
+    if (variable->getName() == "UIViewNoIntrinsicMetric")
+      return 6;
+    // UIKit text-attribute names are the CoreText keys the runtime already
+    // exports under their own string values; only the iOS 6 symbols are missing.
+    if (llvm::StringSwitch<bool>(variable->getName())
+            .Case("NSFontAttributeName", true)
+            .Case("NSForegroundColorAttributeName", true)
+            .Case("NSUnderlineStyleAttributeName", true)
+            .Default(false))
+      return 6;
+    if (variable->getStorageClass() == clang::SC_Static &&
+        variable->getType().isConstQualified() && variable->hasInit()) {
+      auto initializer = variable->getInit()->IgnoreParenImpCasts();
+      bool literal = isa<clang::FloatingLiteral>(initializer) ||
+                     isa<clang::IntegerLiteral>(initializer);
+      if (literal && llvm::StringSwitch<bool>(variable->getName())
+                         .Cases("UILayoutPriorityRequired",
+                                "UILayoutPriorityDefaultHigh", true)
+                         .Cases("UILayoutPriorityDefaultLow",
+                                "UILayoutPriorityFittingSizeLevel", true)
+                         .Default(false))
+        return 6;
+    }
+  }
+  // NSUnderlineStyle's original values are CoreText's; expose them on iOS 5.
+  if (auto element = dyn_cast<clang::EnumConstantDecl>(decl)) {
+    auto owner = dyn_cast<clang::EnumDecl>(element->getDeclContext());
+    if (owner && owner->getName() == "NSUnderlineStyle")
+      return 6;
+  }
+  if (auto named = dyn_cast<clang::NamedDecl>(decl)) {
+    if (named->getIdentifier() && named->getName() == "NSUnderlineStyle")
+      return 6;
+  }
+  // NSLineBreakMode preserves the six pre-iOS-6 UILineBreakMode integer
+  // values. Only those original cases are lowered; future cases stay native.
+  if (auto named = dyn_cast<clang::NamedDecl>(decl)) {
+    if (named->getIdentifier() && named->getName() == "NSLineBreakMode")
+      return 6;
+    if (auto element = dyn_cast<clang::EnumConstantDecl>(decl)) {
+      auto owner = dyn_cast<clang::EnumDecl>(element->getDeclContext());
+      if (owner && owner->getName() == "NSLineBreakMode" &&
+          llvm::StringSwitch<bool>(element->getName())
+              .Cases("NSLineBreakByWordWrapping", "NSLineBreakByCharWrapping", true)
+              .Cases("NSLineBreakByClipping", "NSLineBreakByTruncatingHead", true)
+              .Cases("NSLineBreakByTruncatingTail", "NSLineBreakByTruncatingMiddle", true)
+              .Default(false))
+        return 6;
+    }
+  }
+  // UIButtonTypeSystem is a genuine alias of the pre-iOS-7 rounded-rectangle
+  // type (raw value 1). Legacy builds expose the real API; iOS 5 renders that
+  // system's own rounded-rectangle button style rather than the flat iOS 7 one.
+  if (auto element = dyn_cast<clang::EnumConstantDecl>(decl)) {
+    auto enumOwner = dyn_cast<clang::EnumDecl>(element->getDeclContext());
+    if (enumOwner && enumOwner->getName() == "UIButtonType" &&
+        element->getName() == "UIButtonTypeSystem")
+      return 7;
+  }
+  StringRef owner, member;
+  if (auto method = dyn_cast<clang::ObjCMethodDecl>(decl))
+    member = method->getSelector().getNameForSlot(0);
+  else if (auto property = dyn_cast<clang::ObjCPropertyDecl>(decl))
+    member = property->getName();
+  if (!member.empty()) {
+    auto dc = decl->getDeclContext();
+    if (auto category = dyn_cast<clang::ObjCCategoryDecl>(dc))
+      owner = category->getClassInterface()->getName();
+    else if (auto named = dyn_cast<clang::NamedDecl>(dc))
+      if (named->getIdentifier()) owner = named->getName();
+    if (owner == "UIView")
+      // Constraint methods retain their separate unavailable/shim rule below.
+      // No readable/content/frame guides or baseline anchors: absent runtime.
+      return llvm::StringSwitch<unsigned>(member)
+          // Associated-storage intrinsic sizing and engine invalidation/strengths.
+          .Cases("intrinsicContentSize", "invalidateIntrinsicContentSize", 6)
+          .Cases("contentHuggingPriorityForAxis", "setContentHuggingPriority", 6)
+          .Cases("contentCompressionResistancePriorityForAxis", "setContentCompressionResistancePriority", 6)
+          // Native iOS 8 margins are implemented by the legacy engine as well.
+          .Cases("layoutMargins", "setLayoutMargins", "layoutMarginsDidChange", 8)
+          // Native iOS 9 guide/anchor accessors backed by engine proxy views.
+          .Cases("addLayoutGuide", "layoutMarginsGuide", 9)
+          .Cases("topAnchor", "bottomAnchor", "leadingAnchor", "trailingAnchor", 9)
+          .Cases("leftAnchor", "rightAnchor", "widthAnchor", "heightAnchor", 9)
+          .Cases("centerXAnchor", "centerYAnchor", 9)
+          // iOS 11 safe-area guide: the backport returns the target-appropriate
+          // guide (backport class below 9, Apple's UILayoutGuide at 9..10).
+          .Case("safeAreaLayoutGuide", 11).Default(0);
+    if (owner == "UIActivityViewController")
+      return llvm::StringSwitch<unsigned>(member)
+          .Case("initWithActivityItems", 6)
+          .Case("activityItems", 6).Default(0);
+    if (owner == "NSTextAttachment")
+      return llvm::StringSwitch<unsigned>(member)
+          .Cases("image", "setImage", "bounds", "setBounds", 7)
+          .Case("attachmentBoundsForTextContainer", 7).Default(0);
+    if (owner == "NSTextContainer")
+      return llvm::StringSwitch<unsigned>(member)
+          .Cases("initWithSize", "size", "setSize", 7).Default(0);
+    if (owner == "UILabel")
+      // Implemented by the UIKit backports runtime using CoreText; `text`
+      // mirrors the attributed string as UIKit documents.
+      return (member == "attributedText" || member == "setAttributedText") ? 6 : 0;
+    if (owner == "NSString")
+      // Implemented for the legacy runtime by the UIKit backports: measured with
+      // CoreText using the same attribute-name strings UIKit exports.
+      return member == "sizeWithAttributes" ? 7 : 0;
+    if (owner == "UIScrollView")
+      // The backport API predates Apple's native iOS 10 property. Do not also
+      // expose iOS 11 contentLayoutGuide/frameLayoutGuide (unsupported geometry).
+      return member == "refreshControl" || member == "setRefreshControl" ? 10 : 0;
+    if (owner == "NSIndexPath")
+      return member == "item" || member == "indexPathForItem" ? 6 : 0;
+    return legacyUIKitFamilyCeiling(owner);
+  }
+  if (auto named = dyn_cast<clang::NamedDecl>(decl))
+    if (named->getIdentifier())
+      if (auto ceiling = legacyUIKitFamilyCeiling(named->getName()))
+        return ceiling;
+  // Enum cases inherit the family's ceiling, without lifting newer cases.
+  for (auto dc = decl->getDeclContext(); dc; dc = dc->getParent())
+    if (auto named = dyn_cast<clang::NamedDecl>(dc))
+      if (named->getIdentifier())
+        if (auto ceiling = legacyUIKitFamilyCeiling(named->getName()))
+          return ceiling;
+  return 0;
+}
+
+
 using namespace swift;
 using namespace importer;
 
@@ -8709,6 +8903,17 @@ void ClangImporter::Implementation::importAttributes(
 
       llvm::VersionTuple obsoleted = avail->getObsoleted();
       llvm::VersionTuple introduced = avail->getIntroduced();
+
+      // Legacy backport tiers: an API the backports supply is available from the deployment
+      // target, not from its real introduction. Nothing is lowered at or above introduction, so
+      // Apple's own declaration applies unchanged there.
+      if (SwiftContext.LangOpts.EnableLegacyIOS5Runtime && introduced > llvm::VersionTuple(5, 0)) {
+        unsigned ceiling = legacyUIKitDeclarationCeiling(ClangDecl);
+        unsigned deployment = legacyDeploymentMajor(SwiftContext);
+        if (ceiling && deployment && introduced <= llvm::VersionTuple(ceiling, 0) &&
+            introduced > llvm::VersionTuple(deployment, 0))
+          introduced = llvm::VersionTuple(deployment, 0);
+      }
 
       const auto &replacement = avail->getReplacement();
 

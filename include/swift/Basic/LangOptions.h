@@ -150,6 +150,10 @@ namespace swift {
     /// Disable API availability checking.
     bool DisableAvailabilityChecking = false;
 
+    /// Legacy iOS backport tiers: lower imported availability to the deployment target so APIs the
+    /// backports supply compile at that target, and let the importer see the backport facades.
+    bool EnableLegacyIOS5Runtime = false;
+
     /// Only check the availability of the API, ignore function bodies.
     bool CheckAPIAvailabilityOnly = false;
 
