@@ -164,6 +164,10 @@ void ToolChain::addCommonFrontendArgs(const OutputInfo &OI,
     break;
   }
 
+  // Legacy backport mode must reach the frontend: it switches the importer's availability model.
+  if (inputArgs.hasArg(options::OPT_enable_legacy_ios5_runtime))
+    arguments.push_back("-enable-legacy-ios5-runtime");
+
   if (const Arg *variant = inputArgs.getLastArg(options::OPT_target_variant)) {
     arguments.push_back("-target-variant");
     std::string normalized = llvm::Triple::normalize(variant->getValue());

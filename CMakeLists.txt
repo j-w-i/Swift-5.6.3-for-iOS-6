@@ -167,10 +167,10 @@ endif()
 set(SWIFT_ANALYZE_CODE_COVERAGE FALSE CACHE STRING
     "Build Swift with code coverage instrumenting enabled [FALSE, NOT-MERGED, MERGED]")
 
-# SWIFT_VERSION is deliberately /not/ cached so that an existing build directory
-# can be reused when a new version of Swift comes out (assuming the user hasn't
-# manually set it as part of their own CMake configuration).
-set(SWIFT_VERSION "5.6.3")
+# This build identifies as the Swift shipped in Xcode 13.4.1. SDK modules are binary and are
+# accepted only from a compiler with the same version, so a "5.6.3-dev" identity makes Xcode's
+# SDKs rebuild every module from interface (or refuse them outright).
+set(SWIFT_VERSION "5.6.1")
 
 set(SWIFT_VENDOR "" CACHE STRING
     "The vendor name of the Swift compiler")
